@@ -1,0 +1,69 @@
+[simulation]
+  name    = "conduction"
+  engine  = "srpic"
+  runtime = 20000.0
+
+[grid]
+  resolution = [4096, 2048]
+  extent     = [[0.0, 164.0], [-41.0, 41.0]]
+
+  [grid.metric]
+    metric = "minkowski"
+
+  [grid.boundaries]
+    fields = [["MATCH"], ["PERIODIC"]]
+    particles = [["REFLECT"], ["PERIODIC"]]
+
+    
+[scales]
+  larmor0    = 1.0
+  skindepth0 = 1.0
+
+[algorithms]
+  current_filters = 8
+
+  [algorithms.timestep]
+    CFL = 0.7
+
+[particles]
+  ppc0 = 560.0
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 2e8
+
+  [[particles.species]]
+    label    = "p+"
+    mass     = 1600.0
+    charge   = 1.0
+    maxnpart = 2e8
+    pusher = "None"
+
+[setup]
+  temperature = 0.02      # temperature of maxwell distribution [kB T / (m_e c^2)]
+  temperature_gradient = 10.0    # temperature ratio of electrons to protons
+  reservoir_width = 0.1
+
+[output]
+  interval_time = 100.0
+  format        = "BPFile"
+  
+  [output.fields]
+    quantities = ["N", "B", "E", "T00"]
+
+  [output.particles]
+    enable = true
+    stride = 10 
+
+  [output.spectra]
+    enable = false
+
+[diagnostics]
+  log_level = "WARNING"
+  blocking_timers = true
+
+[checkpoint]
+  interval = 1000
+  keep = 1
