@@ -4,32 +4,95 @@
 #include "enums.h"
 #include "global.h"
 
+#include "arch/kokkos_aliases.h"
 #include "arch/traits.h"
-#include "utils/error.h"
 #include "utils/numeric.h"
 
-#include "archetypes/field_setter.h"
+#include "archetypes/energy_dist.h"
+#include "archetypes/particle_injector.h"
 #include "archetypes/problem_generator.h"
+#include "archetypes/spatial_dist.h"
 #include "archetypes/utils.h"
 #include "framework/domain/metadomain.h"
 
-#include <algorithm>
-#include <utility>
+#include "kernels/particle_moments.hpp"
 
 namespace user {
   using namespace ntt;
 
   template <Dimension D>
   struct InitFields {
+
     /*
-      Set up constant magnetic field in x-direction
+      Sets up background magnetic field for the simulation.
+
+      @param btheta: magnetic field polar angle
+      @param bphi: magnetic field azimuthal angle
     */
-    InitFields() {}
+    InitFields(real_t btheta, real_t bphi)
+      : Btheta { btheta * static_cast<real_t>(convert::deg2rad) }
+      , Bphi { bphi * static_cast<real_t>(convert::deg2rad) } {}
 
     // magnetic field components
     Inline auto bx1(const coord_t<D>&) const -> real_t {
-      return ONE;
+      return math::cos(Btheta);
     }
+
+    Inline auto bx2(const coord_t<D>&) const -> real_t {
+      return math::sin(Btheta) * math::sin(Bphi);
+    }
+
+    Inline auto bx3(const coord_t<D>&) const -> real_t {
+      return math::sin(Btheta) * math::cos(Bphi);
+    }
+
+  private:
+    const real_t Btheta, Bphi;
+  };
+
+  template <SimEngine::type S, class M>
+  struct DensityStep : public arch::SpatialDistribution<S, M> {
+    DensityStep(const M& metric, real_t reservoir_width, real_t x_max, real_t temperature_gradient)
+      : arch::SpatialDistribution<S, M> { metric }
+      , reservoir_width { reservoir_width }
+      , x_max { x_max } 
+      , temperature_gradient { temperature_gradient } {}
+
+    Inline auto operator()(const coord_t<M::Dim>& x_Ph) const -> real_t {
+      if (x_Ph[0] > x_max - reservoir_width) {
+        return ONE/temperature_gradient;
+      } else {
+        return ONE;
+      }
+    }
+
+  private:
+    const real_t reservoir_width, x_max, temperature_gradient;
+  };
+
+  template <SimEngine::type S, class M>
+  struct MaxwellStep : public arch::EnergyDistribution<S, M> {
+    
+    MaxwellStep(const M& metric, random_number_pool_t& pool, real_t reservoir_width, real_t x_max, real_t temp, real_t temperature_gradient) 
+        : arch::EnergyDistribution<S, M>{metric}
+        , pool {pool} 
+        , reservoir_width { reservoir_width }
+        , x_max { x_max } 
+        , temp { temp } 
+        , temperature_gradient { temperature_gradient }  {}
+
+    Inline void operator()(const coord_t<M::Dim>& x_Ph, vec_t<Dim::_3D>& v) const {
+      auto T = temp;
+      // if the particle is in the hot reservoir, set its temperature to the hot temperature
+      if (x_Ph[0] > x_max - reservoir_width) {
+        T = temp * temperature_gradient;
+      }
+      arch::JuttnerSinge(v, T, pool);
+    }
+
+  private:
+    random_number_pool_t pool;
+    real_t reservoir_width, x_max, temp, temperature_gradient;
   };
 
   template <SimEngine::type S, class M>
@@ -37,9 +100,7 @@ namespace user {
     // compatibility traits for the problem generator
     static constexpr auto engines { traits::compatible_with<SimEngine::SRPIC>::value };
     static constexpr auto metrics { traits::compatible_with<Metric::Minkowski>::value };
-    static constexpr auto dimensions {
-      traits::compatible_with<Dim::_1D, Dim::_2D, Dim::_3D>::value
-    };
+    static constexpr auto dimensions { traits::compatible_with<Dim::_2D, Dim::_3D>::value};
 
     // for easy access to variables in the child class
     using arch::ProblemGenerator<S, M>::D;
@@ -53,6 +114,7 @@ namespace user {
     // gas properties
     const real_t    temperature, temperature_gradient;
     // magnetic field properties
+    real_t          Btheta, Bphi;
     InitFields<D>   init_flds;
 
     inline PGen(const SimulationParams& p, Metadomain<S, M>& global_domain)
@@ -63,7 +125,9 @@ namespace user {
       , temperature { p.template get<real_t>("setup.temperature") }
       , temperature_gradient { p.template get<real_t>("setup.temperature_gradient") }
       , reservoir_width { p.template get<real_t>("setup.reservoir_width") }
-      , init_flds { } 
+      , Btheta { p.template get<real_t>("setup.Btheta", ZERO) }
+      , Bphi { p.template get<real_t>("setup.Bphi", ZERO) }
+      , init_flds { Btheta, Bphi }
       {}
 
     inline PGen() {}
@@ -74,58 +138,27 @@ namespace user {
 
     inline void InitPrtls(Domain<S, M>& domain) {
 
-      // define temperatures of species
-      const auto temperatures = std::make_pair(temperature,
-                                               HALF * temperature);
-      // inject particles
-      arch::InjectUniformMaxwellians<S, M>(params, domain, ONE,
-                                           temperatures, { 1, 2 });
-
-      // set cold part of the initial distribution for electrons
-      const auto& mesh    = domain.mesh;
-      const auto box_half = (global_xmax - global_xmin) * HALF;
-
-      // drift velocity to ensure zero net current
-      const auto v_drift = ZERO; // todo
-
       // define cold maxwellian
-      const auto t_cold_e = temperature / temperature_gradient / domain.species[0].mass();
-      const auto maxwellian_cold_e = arch::Maxwellian<S, M>( domain.mesh.metric,
-                                        domain.random_pool, t_cold_e, { v_drift, ZERO, ZERO });
+      const auto T_e = temperature / domain.species[0].mass();
+      const auto maxwellian_e = MaxwellStep<S, M>( domain.mesh.metric, domain.random_pool(), 
+                                                  reservoir_width, global_xmax, T_e, temperature_gradient);
 
-        auto& species = domain.species[0];
-        auto  i1      = species.i1;
-        auto  dx1     = species.dx1;
-        auto  ux1     = species.ux1;
-        auto  ux2     = species.ux2;
-        auto  ux3     = species.ux3;
-        auto  tag     = species.tag;
+      const auto T_p = temperature / domain.species[1].mass();
+      const auto maxwellian_p = MaxwellStep<S, M>( domain.mesh.metric, domain.random_pool(), 
+                                                  reservoir_width, global_xmax, T_p, temperature_gradient);
 
-        Kokkos::parallel_for(
-          "ResetParticles",
-          species.rangeActiveParticles(),
-          Lambda(index_t p) {
-            if (tag(p) == ParticleTag::dead) {
-              return;
-            }
-            const auto x_Cd = static_cast<real_t>(i1(p)) +
-                              static_cast<real_t>(dx1(p));
-            const auto x_Ph = mesh.metric.template convert<1, Crd::Cd, Crd::XYZ>(
-              x_Cd);
+      // define density step
+      const auto density_step = DensityStep<S, M>(domain.mesh.metric, reservoir_width, global_xmax, temperature_gradient);
 
-            const coord_t<M::Dim> x_dummy { ZERO };
+      // inject particles with a density step and a maxwellian energy distribution
+      arch::InjectNonUniform<S, M, decltype(maxwellian_e), decltype(maxwellian_p), decltype(density_step)>(
+        params,
+        domain,
+        { 1, 2 },
+        { maxwellian_e, maxwellian_p },
+        density_step,
+        ONE);
 
-            // cold reservoir at the left boundary
-            if (x_Ph > box_half) {
-              vec_t<Dim::_3D> v_T { ZERO }, v_Cd { ZERO };
-              // sample from cold maxwellian
-              maxwellian_cold_e(x_dummy, v_T);
-              mesh.metric.template transform_xyz<Idx::T, Idx::XYZ>(x_dummy, v_T, v_Cd);
-              ux1(p) = v_Cd[0];
-              ux2(p) = v_Cd[1];
-              ux3(p) = v_Cd[2];
-            }
-          });
     }
 
     void CustomPostStep(timestep_t step, simtime_t time, Domain<S, M>& domain) {
@@ -136,28 +169,28 @@ namespace user {
       // same maxwell distribution as above
       const auto mass_1   = domain.species[0].mass();
       const auto mass_2   = domain.species[1].mass();
-      const auto t_hot_e  = temperature / mass_1;
-      const auto t_hot_p  = temperature / mass_2;
-      const auto t_cold_e = temperature / temperature_gradient / mass_1;
-      const auto t_cold_p = temperature / temperature_gradient / mass_2;
+      const auto t_hot_e  = temperature * temperature_gradient / mass_1;
+      const auto t_hot_p  = temperature * temperature_gradient / mass_2;
+      const auto t_cold_e = temperature / mass_1;
+      const auto t_cold_p = temperature / mass_2;
 
       const auto maxwellian_hot_e = arch::Maxwellian<S, M>(
-        domain.mesh.metric, domain.random_pool,
+        domain.mesh.metric, domain.random_pool(),
         t_hot_e, { ZERO, ZERO, ZERO });
       const auto maxwellian_hot_p = arch::Maxwellian<S, M>(
         domain.mesh.metric,
-        domain.random_pool,
+        domain.random_pool(),
         t_hot_p,
         { ZERO, ZERO, ZERO });
       
       const auto maxwellian_cold_e = arch::Maxwellian<S, M>(
         domain.mesh.metric,
-        domain.random_pool,
+        domain.random_pool(),
         t_cold_e,
         { ZERO, ZERO, ZERO });
       const auto maxwellian_cold_p = arch::Maxwellian<S, M>(
         domain.mesh.metric,
-        domain.random_pool,
+        domain.random_pool(),
         t_cold_p,
         { ZERO, ZERO, ZERO });
 
