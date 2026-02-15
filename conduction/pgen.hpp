@@ -51,18 +51,20 @@ namespace user {
   };
 
   template <SimEngine::type S, class M>
-  struct DensityStep : public arch::SpatialDistribution<S, M> {
-    DensityStep(const M& metric, real_t reservoir_width, real_t x_max, real_t temperature_gradient)
+  struct DensityGradient : public arch::SpatialDistribution<S, M> {
+    DensityGradient(const M& metric, real_t reservoir_width, real_t x_max, real_t temperature_gradient)
       : arch::SpatialDistribution<S, M> { metric }
       , reservoir_width { reservoir_width }
       , x_max { x_max } 
       , temperature_gradient { temperature_gradient } {}
 
     Inline auto operator()(const coord_t<M::Dim>& x_Ph) const -> real_t {
-      if (x_Ph[0] > x_max - reservoir_width) {
-        return ONE/temperature_gradient;
-      } else {
+      if (x_Ph[0] > x_max - reservoir_width) { // cold reservoir at the right boundary
+        return ONE * temperature_gradient;
+      } else if (x_Ph[0] < reservoir_width) { // hot reservoir at the left boundary
         return ONE;
+      } else { // linear density gradient in the middle region
+        return ONE + (temperature_gradient - 1) * (x_Ph[0] - reservoir_width) / (x_max - 2 * reservoir_width);
       }
     }
 
@@ -71,9 +73,9 @@ namespace user {
   };
 
   template <SimEngine::type S, class M>
-  struct MaxwellStep : public arch::EnergyDistribution<S, M> {
+  struct MaxwellGradient : public arch::EnergyDistribution<S, M> {
     
-    MaxwellStep(const M& metric, random_number_pool_t& pool, real_t reservoir_width, real_t x_max, real_t temp, real_t temperature_gradient) 
+    MaxwellGradient(const M& metric, random_number_pool_t& pool, real_t reservoir_width, real_t x_max, real_t temp, real_t temperature_gradient) 
         : arch::EnergyDistribution<S, M>{metric}
         , pool {pool} 
         , reservoir_width { reservoir_width }
@@ -84,8 +86,14 @@ namespace user {
     Inline void operator()(const coord_t<M::Dim>& x_Ph, vec_t<Dim::_3D>& v) const {
       auto T = temp;
       // if the particle is in the hot reservoir, set its temperature to the hot temperature
-      if (x_Ph[0] > x_max - reservoir_width) {
+      if (x_Ph[0] < reservoir_width) {
         T = temp * temperature_gradient;
+      } else if (x_Ph[0] > x_max - reservoir_width) {
+        // if the particle is in the cold reservoir, set its temperature to the cold temperature
+        T = temp;
+      } else {
+        // if the particle is in the middle region, set its temperature according to a linear gradient
+        T = temp * (1 + (temperature_gradient - 1) * (x_Ph[0] - reservoir_width) / (x_max - 2 * reservoir_width));
       }
       arch::JuttnerSinge(v, T, pool);
     }
@@ -140,15 +148,15 @@ namespace user {
 
       // define cold maxwellian
       const auto T_e = temperature / domain.species[0].mass();
-      const auto maxwellian_e = MaxwellStep<S, M>( domain.mesh.metric, domain.random_pool(), 
+      const auto maxwellian_e = MaxwellGradient<S, M>( domain.mesh.metric, domain.random_pool(), 
                                                   reservoir_width, global_xmax, T_e, temperature_gradient);
 
       const auto T_p = temperature / domain.species[1].mass();
-      const auto maxwellian_p = MaxwellStep<S, M>( domain.mesh.metric, domain.random_pool(), 
+      const auto maxwellian_p = MaxwellGradient<S, M>( domain.mesh.metric, domain.random_pool(), 
                                                   reservoir_width, global_xmax, T_p, temperature_gradient);
 
       // define density step
-      const auto density_step = DensityStep<S, M>(domain.mesh.metric, reservoir_width, global_xmax, temperature_gradient);
+      const auto density_step = DensityGradient<S, M>(domain.mesh.metric, reservoir_width, global_xmax, temperature_gradient);
 
       // inject particles with a density step and a maxwellian energy distribution
       arch::InjectNonUniform<S, M, decltype(maxwellian_e), decltype(maxwellian_p), decltype(density_step)>(
@@ -223,9 +231,9 @@ namespace user {
             if (x_Ph < left_threshold) {
               vec_t<Dim::_3D> v_T { ZERO }, v_Cd { ZERO };
               if (s == 1u) {
-                maxwellian_cold_e(x_dummy, v_T);
+                maxwellian_hot_e(x_dummy, v_T);
               } else {
-                maxwellian_cold_p(x_dummy, v_T);
+                maxwellian_hot_p(x_dummy, v_T);
               }
               mesh.metric.template transform_xyz<Idx::T, Idx::XYZ>(x_dummy, v_T, v_Cd);
               ux1(p) = v_Cd[0];
@@ -234,9 +242,9 @@ namespace user {
             } else if (x_Ph > right_threshold) {
               vec_t<Dim::_3D> v_T { ZERO }, v_Cd { ZERO };
               if (s == 1u) {
-                maxwellian_hot_e(x_dummy, v_T);
+                maxwellian_cold_e(x_dummy, v_T);
               } else {
-                maxwellian_hot_p(x_dummy, v_T);
+                maxwellian_cold_p(x_dummy, v_T);
               }
               mesh.metric.template transform_xyz<Idx::T, Idx::XYZ>(x_dummy, v_T, v_Cd);
               ux1(p) = v_Cd[0];
