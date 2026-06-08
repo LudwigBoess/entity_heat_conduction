@@ -281,6 +281,10 @@ namespace user {
       , Bphi { p.template get<real_t>("setup.Bphi", ZERO) }
       , init_flds { Btheta, Bphi } {}
 
+    auto MatchFields(simtime_t) const -> InitFields<D> {
+      return init_flds;
+    }
+
     inline void InitPrtls(Domain<S, M>& domain) {
       const auto T_e = temperature / domain.species[0].mass();
       const auto maxwellian_e = MaxwellGradient<M::Dim>(domain.random_pool(),

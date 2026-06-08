@@ -1,5 +1,5 @@
 [simulation]
-  name    = "conduction"
+  name    = "_conduction"
   engine  = "srpic"
   runtime = 1000.0
 
@@ -11,15 +11,13 @@
     metric = "minkowski"
 
   [grid.boundaries]
-    fields = [["ABSORB"], ["PERIODIC"]]
-    # PERIODIC (not REFLECT): the reflecting thermal walls are implemented in the
-    # pgen via CustomParticleUpdate, which is the sole wall handler.
-    particles = [["REFLECT"], ["PERIODIC"]]
+    fields = [["MATCH", "MATCH"], ["PERIODIC"]]
+    particles = [["PERIODIC", "PERIODIC"], ["PERIODIC"]]
 
     # absorbing layer for the fields: damps whistlers toward B0 before they reach
     # the reflecting wall. ~9.4 code units ~= 9.4 rho_e1 ~= 192 cells, matching the
     # buffer L_D of Komarov et al. 2018 (default would be only min_extent*0.01 ~= 5 cells).
-    [grid.boundaries.absorb]
+    [grid.boundaries.match]
       ds = 9.4
 
 [scales]
@@ -40,6 +38,7 @@
 
 [particles]
   ppc0 = 400.0
+  spatial_sorting_interval = 8
 
   [[particles.species]]
     label    = "e-"
@@ -57,7 +56,7 @@
 [setup]
   temperature = 0.1      # cold-side electron temperature [kB T / (m_e c^2)]; T_hot = temperature*temperature_gradient
   temperature_gradient = 2.0    # T_hot / T_cold = T1/T2 (paper fiducial 2; scan {1.5, 2, 3})
-  reservoir_width = 0.1         # width of the flat-T0 reservoirs in the initial profile only
+  reservoir_width = 9.4         # width of the flat-T0 reservoirs in the initial profile only
 
 [output]
   interval_time = 10.0
@@ -66,6 +65,8 @@
   [output.fields]
     quantities = ["N", "B", "E", "T00"]
     custom     = ["Qx", "Qy", "Qz"]   # electron heat flux (1/2) m <v_i v^2>; Qx = q_|| along B0
+  [output.fields.smoothing]
+    order = 2
 
   [output.particles]
     enable = true
