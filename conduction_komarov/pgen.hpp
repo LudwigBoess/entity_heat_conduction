@@ -309,6 +309,8 @@ namespace user {
         { maxwellian_e, maxwellian_p },
         density_step,
         ONE);
+
+      domain.species[1].set_npart(0);
     }
 
     /*
@@ -316,7 +318,12 @@ namespace user {
       A particle leaving through x=xmin (hot) / x=xmax (cold) is reflected back in
       with a fresh speed from the flux-weighted Maxwellian f0(u)*|v_x| at the wall
       temperature, advanced by the time-of-flight remaining after the collision.
-      Applied inside the pusher; the x particle BC must NOT also reflect.
+      Runs inside the pusher BEFORE boundaryConditions and repositions the particle
+      to i1=0 / ni1-2 (inside the domain), so the global x particle BC should be
+      REFLECT, not PERIODIC: REFLECT will not double-reflect these already-inside
+      particles, but it is a safe backstop that specularly bounces any crosser this
+      kernel misses, instead of PERIODIC wrapping it from the hot wall to the cold
+      reservoir (a silent gradient-corrupting teleport).
     */
     struct CustomPrtlUpdate {
       random_number_pool_t pool;
@@ -436,13 +443,11 @@ namespace user {
     auto CustomParticleUpdate(simtime_t /*time*/, spidx_t sp, DOM& domain) const
       -> CustomPrtlUpdate {
       const auto m = domain.species[sp - 1].mass(); // sp is 1-indexed
-      return CustomPrtlUpdate {
-        domain.random_pool(),
-        temperature * temperature_gradient / m, // hot wall at xmin (left)
-        temperature / m,                        // cold wall at xmax (right)
-        global_xmin,
-        global_xmax
-      };
+      return CustomPrtlUpdate{domain.random_pool(),
+                              temperature * temperature_gradient / m, // hot wall at xmin (left)
+                              temperature / m,                        // cold wall at xmax (right)
+                              global_xmin, 
+                              global_xmax};
     }
 
     /*
